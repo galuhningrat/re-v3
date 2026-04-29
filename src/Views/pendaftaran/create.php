@@ -1,13 +1,14 @@
 <?php
 
 /**
- * View: pendaftaran/create.php (v2)
+ * View: pendaftaran/create.php (v3 — fixed)
  * Alur: Input NIK → cek pasien lama/baru → pilih poli → tampil dokter on-duty → submit
-* @var string $title
- * @var array $poliList
- * @var array $kamarList
- * @var array $errors
- * @var array $old
+ *
+ * @var string $title
+ * @var array  $poliList
+ * @var array  $kamarList
+ * @var array  $errors
+ * @var array  $old
  */
 ?>
 
@@ -36,7 +37,7 @@
 
     <div class="row g-4">
 
-        <!-- ═══ KOLOM KIRI: Data Pasien ═══ -->
+        <!-- ═══ KOLOM KIRI: Identifikasi Pasien ═══ -->
         <div class="col-md-6">
             <div class="card shadow-sm">
                 <div class="card-header fw-bold bg-primary text-white">
@@ -44,7 +45,6 @@
                 </div>
                 <div class="card-body">
 
-                    <!-- NIK Input -->
                     <div class="mb-3">
                         <label class="form-label fw-semibold">
                             NIK (Nomor Induk Kependudukan) <span class="text-danger">*</span>
@@ -61,7 +61,7 @@
                         <div id="nikStatus" class="mt-2"></div>
                     </div>
 
-                    <!-- Informasi Pasien (muncul setelah NIK dicek) -->
+                    <!-- Pasien lama ditemukan -->
                     <div id="sectionPasienLama" class="d-none">
                         <div class="alert alert-success py-2">
                             <i class="bi bi-check-circle me-1"></i>
@@ -87,7 +87,7 @@
                         </table>
                     </div>
 
-                    <!-- Form Pasien Baru (muncul jika NIK belum terdaftar) -->
+                    <!-- Form pasien baru -->
                     <div id="sectionPasienBaru" class="d-none">
                         <div class="alert alert-warning py-2">
                             <i class="bi bi-person-plus me-1"></i>
@@ -155,7 +155,7 @@
                         </select>
                     </div>
 
-                    <!-- Dokter (dynamic berdasarkan poli & hari ini) -->
+                    <!-- Dokter (dynamic berdasarkan poli) -->
                     <div class="mb-3">
                         <label class="form-label fw-semibold">
                             Dokter On-Duty <span class="text-danger">*</span>
@@ -219,148 +219,162 @@
 </form>
 
 <script>
-    // ─── AJAX: Cek NIK ────────────────────────────────────────────
-    document.getElementById('btnCekNik').addEventListener('click', function() {
-        const nik = document.getElementById('inputNik').value.trim();
-        const status = document.getElementById('nikStatus');
+    (function() {
+        'use strict';
 
-        if (nik.length !== 16 || isNaN(nik)) {
-            status.innerHTML = '<div class="alert alert-warning py-2">NIK harus tepat 16 digit angka.</div>';
-            return;
-        }
+        // ── Elemen DOM ────────────────────────────────────────────
+        const inputNik = document.getElementById('inputNik');
+        const btnCekNik = document.getElementById('btnCekNik');
+        const nikStatus = document.getElementById('nikStatus');
+        const selectPoli = document.getElementById('selectPoli');
+        const selectDokter = document.getElementById('selectDokter'); // konsisten satu nama
+        const kuotaInfo = document.getElementById('kuotaInfo');
+        const btnSubmit = document.getElementById('btnSubmit');
+        const isNewPasienInput = document.getElementById('isNewPasien');
+        const pasienIdInput = document.getElementById('pasienId');
+        const sectionLama = document.getElementById('sectionPasienLama');
+        const sectionBaru = document.getElementById('sectionPasienBaru');
+        const sectionPlaceholder = document.getElementById('sectionNikPlaceholder');
 
-        status.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm"></span> Mengecek NIK...</div>';
+        // ── AJAX: Cek NIK ────────────────────────────────────────
+        btnCekNik.addEventListener('click', function() {
+            const nik = inputNik.value.trim();
 
-        fetch('<?= BASE_URL ?>/pendaftaran/cek-nik', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: 'nik=' + encodeURIComponent(nik)
-            })
-            .then(r => r.json())
-            .then(data => {
-                status.innerHTML = '';
-                document.getElementById('sectionNikPlaceholder').classList.add('d-none');
+            if (nik.length !== 16 || !/^\d+$/.test(nik)) {
+                nikStatus.innerHTML = '<div class="alert alert-warning py-2">NIK harus tepat 16 digit angka.</div>';
+                return;
+            }
 
-                if (data.found) {
-                    // Pasien lama — isi info
-                    document.getElementById('sectionPasienLama').classList.remove('d-none');
-                    document.getElementById('sectionPasienBaru').classList.add('d-none');
-                    document.getElementById('isNewPasien').value = '0';
-                    document.getElementById('pasienId').value = data.pasien.id;
-                    document.getElementById('infoPasienId').textContent = data.pasien.id;
-                    document.getElementById('infoPasienNama').textContent = data.pasien.nama;
-                    document.getElementById('infoPasienKeluhan').textContent = data.pasien.keluhan;
-                    document.getElementById('infoPasienHp').textContent = data.pasien.no_hp || '—';
-                } else {
-                    // Pasien baru — tampilkan form input
-                    document.getElementById('sectionPasienBaru').classList.remove('d-none');
-                    document.getElementById('sectionPasienLama').classList.add('d-none');
-                    document.getElementById('isNewPasien').value = '1';
-                    document.getElementById('pasienId').value = '';
-                }
-                enableSubmitIfReady();
-            })
-            .catch(() => {
-                status.innerHTML = '<div class="alert alert-danger py-2">Gagal menghubungi server.</div>';
-            });
-    });
+            nikStatus.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm"></span> Mengecek NIK...</div>';
 
-    // ─── AJAX: Load dokter berdasarkan poli ──────────────────────
-    document.getElementById('selectPoli').addEventListener('change', function() {
-        const poliId = this.value;
-        const selDok = document.getElementById('selectDokter');
-        const kuota = document.getElementById('kuotaInfo');
+            fetch('<?= BASE_URL ?>/pendaftaran/cek-nik', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: 'nik=' + encodeURIComponent(nik)
+                })
+                .then(function(response) {
+                    // FIX: parse JSON sekali saja dari Response object
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.json();
+                })
+                .then(function(data) {
+                    nikStatus.innerHTML = '';
+                    sectionPlaceholder.classList.add('d-none');
 
-        if (!poliId) {
-            selDok.innerHTML = '<option>— Pilih poli dulu —</option>';
-            selDok.disabled = true;
-            kuota.innerHTML = '';
-            return;
-        }
+                    if (data.found) {
+                        sectionLama.classList.remove('d-none');
+                        sectionBaru.classList.add('d-none');
+                        isNewPasienInput.value = '0';
+                        pasienIdInput.value = data.pasien.id;
 
-        selDok.innerHTML = '<option>Memuat dokter...</option>';
-        selDok.disabled = true;
-
-        fetch('<?= BASE_URL ?>/pendaftaran/get-dokter', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: 'poli_id=' + encodeURIComponent(poliId)
-            })
-            .then(r => r.json())
-            .then(r => {
-                if (!r.ok) throw new Error('Server error: ' + r.status);
-                return r.json();
-            })
-            .then(list => {
-                selectDokter.innerHTML = '<option value="">— Pilih Dokter —</option>';
-
-                if (Array.isArray(list) && list.length === 0) {
-                    // Seharusnya tidak terjadi lagi setelah fallback di backend
-                    selectDokter.innerHTML = '<option value="">Tidak ada dokter tersedia</option>';
-                    kuotaInfo.innerHTML =
-                        '<span class="text-danger">' +
-                        '<i class="bi bi-exclamation-circle me-1"></i>' +
-                        'Belum ada dokter terdaftar di sistem.' +
-                        '</span>';
-                    return;
-                }
-
-                list.forEach(function(d) {
-                    const kuota = parseInt(d.kuota) || 999;
-                    const terpakai = parseInt(d.terpakai) || 0;
-                    const sisa = kuota - terpakai;
-
-                    // Susun label dengan info jadwal jika ada
-                    let label = d.nama + ' (' + d.spesialis + ')';
-                    if (d.jam_mulai && d.jam_selesai && d.jam_mulai !== '08:00:00' || kuota < 999) {
-                        label += '  —  ' + d.jam_mulai.slice(0, 5) + '–' + d.jam_selesai.slice(0, 5);
-                        label += '  |  Sisa: ' + sisa + '/' + kuota;
+                        document.getElementById('infoPasienId').textContent = data.pasien.id;
+                        document.getElementById('infoPasienNama').textContent = data.pasien.nama;
+                        document.getElementById('infoPasienKeluhan').textContent = data.pasien.keluhan;
+                        document.getElementById('infoPasienHp').textContent = data.pasien.no_hp || '—';
+                    } else {
+                        sectionBaru.classList.remove('d-none');
+                        sectionLama.classList.add('d-none');
+                        isNewPasienInput.value = '1';
+                        pasienIdInput.value = '';
                     }
-
-                    const opt = new Option(label, d.id);
-                    // Disable hanya jika punya kuota terbatas dan sudah penuh
-                    if (kuota < 999 && sisa <= 0) {
-                        opt.disabled = true;
-                        opt.text += '  ⛔ PENUH';
-                    }
-                    selectDokter.add(opt);
+                    enableSubmitIfReady();
+                })
+                .catch(function() {
+                    nikStatus.innerHTML = '<div class="alert alert-danger py-2">Gagal menghubungi server.</div>';
                 });
+        });
 
-                selectDokter.disabled = false;
+        // ── AJAX: Load dokter berdasarkan poli ──────────────────
+        selectPoli.addEventListener('change', function() {
+            const poliId = this.value;
 
-                // Tampilkan info fallback level jika bukan jadwal hari ini
-                const infoText = list[0] && list[0].keterangan ?
-                    list[0].keterangan :
-                    list.length + ' dokter tersedia';
+            if (!poliId) {
+                selectDokter.innerHTML = '<option value="">— Pilih poli dulu —</option>';
+                selectDokter.disabled = true;
+                kuotaInfo.innerHTML = '';
+                return;
+            }
 
-                kuotaInfo.innerHTML =
-                    '<span class="text-muted small">' +
-                    '<i class="bi bi-info-circle me-1"></i>' +
-                    infoText +
-                    '</span>';
-            })
-            .catch(() => {
-                selDok.innerHTML = '<option value="">Gagal memuat dokter</option>';
-            });
-    });
+            selectDokter.innerHTML = '<option>Memuat dokter...</option>';
+            selectDokter.disabled = true;
+            kuotaInfo.innerHTML = '';
 
-    // ─── Enable submit button ─────────────────────────────────────
-    function enableSubmitIfReady() {
-        const nikOk = document.getElementById('inputNik').value.length === 16;
-        const dokOk = document.getElementById('selectDokter').value !== '';
-        document.getElementById('btnSubmit').disabled = !(nikOk);
-    }
+            fetch('<?= BASE_URL ?>/pendaftaran/get-dokter', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: 'poli_id=' + encodeURIComponent(poliId)
+                })
+                .then(function(response) {
+                    // FIX: parse JSON sekali saja — sebelumnya ada double .json() yang menyebabkan error
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.json();
+                })
+                .then(function(list) {
+                    // FIX: konsisten pakai selectDokter (bukan campuran selectDokter/selDok)
+                    selectDokter.innerHTML = '<option value="">— Pilih Dokter —</option>';
 
-    document.getElementById('selectDokter').addEventListener('change', enableSubmitIfReady);
-    document.getElementById('inputNik').addEventListener('input', () => {
-        if (document.getElementById('inputNik').value.length !== 16) {
-            document.getElementById('sectionNikPlaceholder').classList.remove('d-none');
-            document.getElementById('sectionPasienLama').classList.add('d-none');
-            document.getElementById('sectionPasienBaru').classList.add('d-none');
+                    if (!Array.isArray(list) || list.length === 0) {
+                        selectDokter.innerHTML = '<option value="">Tidak ada dokter tersedia</option>';
+                        kuotaInfo.innerHTML = '<span class="text-danger"><i class="bi bi-exclamation-circle me-1"></i>Belum ada dokter terdaftar di sistem.</span>';
+                        return;
+                    }
+
+                    list.forEach(function(d) {
+                        const kuota = parseInt(d.kuota) || 999;
+                        const terpakai = parseInt(d.terpakai) || 0;
+                        const sisa = kuota - terpakai;
+
+                        let label = d.nama + ' (' + d.spesialis + ')';
+
+                        // Tambahkan info jadwal jika data jadwal tersedia
+                        const jamMulai = (d.jam_mulai || '').slice(0, 5);
+                        const jamSelesai = (d.jam_selesai || '').slice(0, 5);
+                        if (jamMulai && jamSelesai && kuota < 999) {
+                            label += '  —  ' + jamMulai + '–' + jamSelesai;
+                            label += '  |  Sisa: ' + sisa + '/' + kuota;
+                        }
+
+                        const opt = new Option(label, d.id);
+                        opt.disabled = (kuota < 999 && sisa <= 0);
+                        if (opt.disabled) opt.text += '  ⛔ PENUH';
+                        selectDokter.add(opt);
+                    });
+
+                    selectDokter.disabled = false;
+
+                    const keterangan = (list[0] && list[0].keterangan) ? list[0].keterangan : (list.length + ' dokter tersedia');
+                    kuotaInfo.innerHTML = '<span class="text-muted small"><i class="bi bi-info-circle me-1"></i>' + keterangan + '</span>';
+
+                    enableSubmitIfReady();
+                })
+                .catch(function() {
+                    // FIX: konsisten pakai selectDokter
+                    selectDokter.innerHTML = '<option value="">Gagal memuat dokter</option>';
+                    kuotaInfo.innerHTML = '<span class="text-danger small">Gagal mengambil data dokter dari server.</span>';
+                });
+        });
+
+        // ── Enable tombol submit ─────────────────────────────────
+        function enableSubmitIfReady() {
+            const nikOk = inputNik.value.length === 16;
+            btnSubmit.disabled = !nikOk;
         }
-    });
+
+        selectDokter.addEventListener('change', enableSubmitIfReady);
+
+        inputNik.addEventListener('input', function() {
+            if (inputNik.value.length !== 16) {
+                sectionPlaceholder.classList.remove('d-none');
+                sectionLama.classList.add('d-none');
+                sectionBaru.classList.add('d-none');
+                nikStatus.innerHTML = '';
+                enableSubmitIfReady();
+            }
+        });
+
+    }());
 </script>

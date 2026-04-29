@@ -4,10 +4,11 @@ namespace App\Controllers;
 
 use App\Core\BaseController;
 use App\Core\Auth;
+use App\Core\Database;
 use App\Models\Pendaftaran;
 use App\Models\Pasien;
-use App\Models\Dokter;
 use App\Models\Kamar;
+use App\Models\Poli;
 
 class PendaftaranController extends BaseController
 {
@@ -51,22 +52,19 @@ class PendaftaranController extends BaseController
     {
         Auth::requireRole('admin');
         try {
-            $pasienList = Pasien::findAll();
-            $dokterList = Dokter::findAll();
-            $kamarList  = Kamar::findTersedia();
+            $poliList  = Poli::findAll(true);   // hanya poli aktif
+            $kamarList = Kamar::findTersedia();
             $this->render('pendaftaran/create', [
-                'title'      => 'Buat Pendaftaran Baru',
-                'pasienList' => $pasienList,
-                'dokterList' => $dokterList,
-                'kamarList'  => $kamarList,
+                'title'     => 'Buat Pendaftaran Baru',
+                'poliList'  => $poliList,
+                'kamarList' => $kamarList,
             ]);
         } catch (\RuntimeException $e) {
             $this->render('pendaftaran/create', [
-                'title'      => 'Buat Pendaftaran Baru',
-                'pasienList' => [],
-                'dokterList' => [],
-                'kamarList'  => [],
-                'error'      => $e->getMessage(),
+                'title'     => 'Buat Pendaftaran Baru',
+                'poliList'  => [],
+                'kamarList' => [],
+                'error'     => $e->getMessage(),
             ]);
         }
     }
@@ -76,17 +74,60 @@ class PendaftaranController extends BaseController
     {
         Auth::requireRole('admin');
 
+        $isNewPasien = ($_POST['is_new_pasien'] ?? '0') === '1';
+        $pasienId    = trim($_POST['pasien_id'] ?? '');
+
+        // ── Jika pasien baru, daftarkan dulu ke tabel pasien ──
+        if ($isNewPasien) {
+            $nama    = htmlspecialchars(trim($_POST['nama']    ?? ''));
+            $keluhan = htmlspecialchars(trim($_POST['keluhan'] ?? ''));
+            $nik     = trim($_POST['nik'] ?? '');
+
+            if (empty($nama) || empty($keluhan)) {
+                $this->renderCreateWithErrors(
+                    ['Nama dan keluhan pasien baru wajib diisi.'],
+                    $_POST
+                );
+                return;
+            }
+
+            try {
+                $pasienId = Pasien::generateId();
+                $pdo      = Database::getInstance()->getConnection();
+                $stmt     = $pdo->prepare(
+                    "INSERT INTO pasien (id, nik, nama, keluhan, tanggal_lahir, alamat, no_hp)
+                     VALUES (:id, :nik, :nama, :keluhan, :tanggal_lahir, :alamat, :no_hp)"
+                );
+                $stmt->execute([
+                    ':id'            => $pasienId,
+                    ':nik'           => $nik ?: null,
+                    ':nama'          => $nama,
+                    ':keluhan'       => $keluhan,
+                    ':tanggal_lahir' => trim($_POST['tanggal_lahir'] ?? '') ?: null,
+                    ':alamat'        => htmlspecialchars(trim($_POST['alamat'] ?? '')) ?: null,
+                    ':no_hp'         => htmlspecialchars(trim($_POST['no_hp']   ?? '')) ?: null,
+                ]);
+            } catch (\Exception $e) {
+                $this->renderCreateWithErrors(
+                    ['Gagal menyimpan data pasien baru: ' . $e->getMessage()],
+                    $_POST
+                );
+                return;
+            }
+        }
+
         $data = [
-            'pasien_id'     => trim($_POST['pasien_id']     ?? ''),
+            'pasien_id'     => $pasienId,
             'dokter_id'     => trim($_POST['dokter_id']     ?? ''),
             'kamar_id'      => trim($_POST['kamar_id']      ?? ''),
+            'poli_id'       => trim($_POST['poli_id']       ?? '') ?: null,
             'tanggal_janji' => trim($_POST['tanggal_janji'] ?? ''),
             'status'        => 'menunggu',
             'catatan'       => trim($_POST['catatan']       ?? '') ?: null,
         ];
 
         $errors = [];
-        if (empty($data['pasien_id']))     $errors[] = 'Pasien wajib dipilih.';
+        if (empty($data['pasien_id']))     $errors[] = 'Pasien wajib diidentifikasi melalui NIK.';
         if (empty($data['dokter_id']))     $errors[] = 'Dokter wajib dipilih.';
         if (empty($data['kamar_id']))      $errors[] = 'Kamar wajib dipilih.';
         if (empty($data['tanggal_janji'])) $errors[] = 'Tanggal janji wajib diisi.';
@@ -95,31 +136,36 @@ class PendaftaranController extends BaseController
         }
 
         if (!empty($errors)) {
-            $this->render('pendaftaran/create', [
-                'title'      => 'Buat Pendaftaran Baru',
-                'pasienList' => Pasien::findAll(),
-                'dokterList' => Dokter::findAll(),
-                'kamarList'  => Kamar::findTersedia(),
-                'errors'     => $errors,
-                'old'        => $_POST,
-            ]);
+            $this->renderCreateWithErrors($errors, $_POST);
             return;
         }
 
         try {
             $newId = Pendaftaran::create($data);
+
+            // ── Auto-generate nomor antrean ───────────────────────
+            // Antrean dibuat otomatis setelah pendaftaran berhasil.
+            // Jika gagal (misal poli_id null atau error DB), pendaftaran
+            // tetap dianggap berhasil — nomor bisa digenerate manual nanti.
+            $nomorAntrean = null;
+            if (!empty($data['poli_id'])) {
+                try {
+                    $antrean      = new \App\Models\Antrean($newId, (int) $data['poli_id']);
+                    $nomorAntrean = $antrean->simpan();
+                } catch (\Exception $antreanErr) {
+                    // Sengaja diabaikan — pendaftaran tidak dibatalkan
+                }
+            }
+
+            $successMsg = $nomorAntrean
+                ? 'Pendaftaran+berhasil+dibuat.+Nomor+antrean%3A+' . urlencode($nomorAntrean)
+                : 'Pendaftaran+berhasil+dibuat';
+
             header('Location: ' . BASE_URL . '/pendaftaran/show/' . $newId
-                . '?success=Pendaftaran+berhasil+dibuat');
+                . '?success=' . $successMsg);
             exit;
         } catch (\RuntimeException | \InvalidArgumentException $e) {
-            $this->render('pendaftaran/create', [
-                'title'      => 'Buat Pendaftaran Baru',
-                'pasienList' => Pasien::findAll(),
-                'dokterList' => Dokter::findAll(),
-                'kamarList'  => Kamar::findTersedia(),
-                'errors'     => [$e->getMessage()],
-                'old'        => $_POST,
-            ]);
+            $this->renderCreateWithErrors([$e->getMessage()], $_POST);
         }
     }
 
@@ -178,5 +224,97 @@ class PendaftaranController extends BaseController
             header('Location: ' . BASE_URL . '/pendaftaran?error=' . urlencode($e->getMessage()));
         }
         exit;
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // AJAX Endpoints (sebelumnya TIDAK ADA — inilah penyebab
+    // "Gagal menghubungi server")
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * POST /pendaftaran/cek-nik
+     *
+     * Mengecek apakah NIK sudah terdaftar sebagai pasien.
+     * Response JSON: { found: bool, pasien?: { id, nama, keluhan, no_hp } }
+     */
+    public function cekNik(): void
+    {
+        Auth::requireRole('admin');
+        header('Content-Type: application/json');
+
+        $nik = trim($_POST['nik'] ?? '');
+
+        if (strlen($nik) !== 16 || !ctype_digit($nik)) {
+            echo json_encode(['found' => false, 'error' => 'NIK harus tepat 16 digit angka']);
+            return;
+        }
+
+        try {
+            $pdo  = Database::getInstance()->getConnection();
+            $stmt = $pdo->prepare(
+                "SELECT id, nama, keluhan, no_hp
+                 FROM pasien
+                 WHERE nik = :nik
+                 LIMIT 1"
+            );
+            $stmt->execute([':nik' => $nik]);
+            $pasien = $stmt->fetch();
+
+            echo json_encode(
+                $pasien
+                    ? ['found' => true,  'pasien' => $pasien]
+                    : ['found' => false]
+            );
+        } catch (\Exception $e) {
+            http_response_code(500);
+            echo json_encode(['found' => false, 'error' => 'Gagal mengecek NIK ke database']);
+        }
+    }
+
+    /**
+     * POST /pendaftaran/get-dokter
+     *
+     * Mengambil daftar dokter on-duty untuk poli tertentu.
+     * Response JSON: array of dokter dengan info jadwal & kuota.
+     */
+    public function getDokterAjax(): void
+    {
+        Auth::requireRole('admin');
+        header('Content-Type: application/json');
+
+        $poliId = (int) ($_POST['poli_id'] ?? 0);
+        if (!$poliId) {
+            echo json_encode([]);
+            return;
+        }
+
+        try {
+            $list = Pendaftaran::getDokterByPoli($poliId);
+            echo json_encode($list);
+        } catch (\Exception $e) {
+            http_response_code(500);
+            echo json_encode([]);
+        }
+    }
+
+    // ─── Private Helper ───────────────────────────────────────
+
+    /** Re-render form create dengan pesan error dan repopulate input */
+    private function renderCreateWithErrors(array $errors, array $old = []): void
+    {
+        try {
+            $poliList  = Poli::findAll(true);
+            $kamarList = Kamar::findTersedia();
+        } catch (\Exception $e) {
+            $poliList  = [];
+            $kamarList = [];
+        }
+        $this->render('pendaftaran/create', [
+            'title'     => 'Buat Pendaftaran Baru',
+            'poliList'  => $poliList,
+            'kamarList' => $kamarList,
+            'errors'    => $errors,
+            'old'       => $old,
+        ]);
     }
 }

@@ -35,8 +35,6 @@ class Pendaftaran implements Printable
 
     /**
      * Implementasi wajib dari Interface Printable.
-     *
-     * @return string
      */
     public function printStruk(): string
     {
@@ -54,13 +52,11 @@ class Pendaftaran implements Printable
     }
 
     // =========================================================
-    // Database Operations — JOIN 3 tabel
+    // Database Operations
     // =========================================================
 
     /**
-     * Ambil semua pendaftaran dengan JOIN ke pasien, dokter, kamar.
-     *
-     * @return array
+     * Ambil semua pendaftaran dengan JOIN ke pasien, dokter, kamar, poli.
      */
     public static function findAll(): array
     {
@@ -81,11 +77,13 @@ class Pendaftaran implements Printable
                     dk.spesialis AS dokter_spesialis,
                     km.id        AS kamar_id,
                     km.nomor_kamar,
-                    km.tipe      AS kamar_tipe
+                    km.tipe      AS kamar_tipe,
+                    po.nama      AS poli_nama
                 FROM pendaftaran pn
                 JOIN pasien  ps ON pn.pasien_id = ps.id
                 JOIN dokter  dk ON pn.dokter_id = dk.id
                 JOIN kamar   km ON pn.kamar_id  = km.id
+                LEFT JOIN poli po ON pn.poli_id = po.id
                 ORDER BY pn.created_at DESC
             ");
             return $stmt->fetchAll();
@@ -95,10 +93,10 @@ class Pendaftaran implements Printable
     }
 
     /**
-     * Ambil satu pendaftaran by ID dengan JOIN lengkap.
+     * Ambil satu pendaftaran by ID dengan JOIN lengkap termasuk nik & poli.
      *
-     * @param int $id
-     * @return array|null
+     * PERBAIKAN: tambahkan ps.nik AS pasien_nik dan join ke tabel poli
+     * agar show.php bisa menampilkan NIK dan nama poli.
      */
     public static function findById(int $id): ?array
     {
@@ -111,8 +109,10 @@ class Pendaftaran implements Printable
                     pn.status,
                     pn.catatan,
                     pn.created_at,
+                    pn.nomor_registrasi,
                     ps.id        AS pasien_id,
                     ps.nama      AS pasien_nama,
+                    ps.nik       AS pasien_nik,
                     ps.keluhan   AS pasien_keluhan,
                     ps.no_hp     AS pasien_hp,
                     dk.id        AS dokter_id,
@@ -122,11 +122,19 @@ class Pendaftaran implements Printable
                     km.id        AS kamar_id,
                     km.nomor_kamar,
                     km.tipe      AS kamar_tipe,
-                    km.harga_per_malam
+                    km.harga_per_malam,
+                    po.id        AS poli_id,
+                    po.nama      AS poli_nama,
+                    (SELECT a.nomor_antrean
+                     FROM antrean a
+                     WHERE a.pendaftaran_id = pn.id
+                     ORDER BY a.id DESC
+                     LIMIT 1)   AS nomor_antrean
                 FROM pendaftaran pn
                 JOIN pasien  ps ON pn.pasien_id = ps.id
                 JOIN dokter  dk ON pn.dokter_id = dk.id
                 JOIN kamar   km ON pn.kamar_id  = km.id
+                LEFT JOIN poli po ON pn.poli_id = po.id
                 WHERE pn.id = :id
             ");
             $stmt->execute([':id' => $id]);
@@ -141,6 +149,8 @@ class Pendaftaran implements Printable
      * Simpan pendaftaran baru + update status kamar.
      * Dibungkus dalam Transaction agar atomik.
      *
+     * PERBAIKAN: tambahkan poli_id ke INSERT
+     *
      * @param array $data
      * @return int ID pendaftaran yang baru dibuat
      */
@@ -148,7 +158,6 @@ class Pendaftaran implements Printable
     {
         $pdo = Database::getInstance()->getConnection();
 
-        // Validasi data wajib
         $required = ['pasien_id', 'dokter_id', 'kamar_id', 'tanggal_janji'];
         foreach ($required as $field) {
             if (empty($data[$field])) {
@@ -159,7 +168,7 @@ class Pendaftaran implements Printable
         try {
             $pdo->beginTransaction();
 
-            // 1. Cek kamar masih tersedia
+            // 1. Cek kamar masih tersedia (dengan lock)
             $stmtKamar = $pdo->prepare(
                 "SELECT is_tersedia FROM kamar WHERE id = :id FOR UPDATE"
             );
@@ -169,26 +178,26 @@ class Pendaftaran implements Printable
             if (!$kamar) {
                 throw new \RuntimeException('Kamar tidak ditemukan.');
             }
-            // PostgreSQL: is_tersedia adalah boolean, nilainya 't' atau true
             if ($kamar['is_tersedia'] === false || $kamar['is_tersedia'] === 'f') {
                 throw new \RuntimeException('Kamar sudah terisi, pilih kamar lain.');
             }
 
-            // 2. Insert pendaftaran
+            // 2. Insert pendaftaran (termasuk poli_id)
             $stmt = $pdo->prepare("
                 INSERT INTO pendaftaran
-                    (pasien_id, dokter_id, kamar_id, tanggal_janji, status, catatan)
+                    (pasien_id, dokter_id, kamar_id, poli_id, tanggal_janji, status, catatan)
                 VALUES
-                    (:pasien_id, :dokter_id, :kamar_id, :tanggal_janji, :status, :catatan)
+                    (:pasien_id, :dokter_id, :kamar_id, :poli_id, :tanggal_janji, :status, :catatan)
                 RETURNING id
             ");
             $stmt->execute([
-                ':pasien_id'    => $data['pasien_id'],
-                ':dokter_id'    => $data['dokter_id'],
-                ':kamar_id'     => (int) $data['kamar_id'],
+                ':pasien_id'     => $data['pasien_id'],
+                ':dokter_id'     => $data['dokter_id'],
+                ':kamar_id'      => (int) $data['kamar_id'],
+                ':poli_id'       => $data['poli_id'] ?? null,
                 ':tanggal_janji' => $data['tanggal_janji'],
-                ':status'       => $data['status'] ?? 'menunggu',
-                ':catatan'      => $data['catatan'] ?? null,
+                ':status'        => $data['status'] ?? 'menunggu',
+                ':catatan'       => $data['catatan'] ?? null,
             ]);
 
             $newId = (int) $stmt->fetchColumn();
@@ -211,89 +220,87 @@ class Pendaftaran implements Printable
     /**
      * Ambil dokter on-duty hari ini untuk poli tertentu.
      *
+     * PERBAIKAN: menggunakan self::hariIniIndonesia() yang kini
+     * didefinisikan di class ini (sebelumnya method ini tidak ada
+     * sehingga menyebabkan fatal error saat getDokterAjax dipanggil).
+     *
      * FALLBACK LOGIC:
-     * 1. Coba ambil dokter dengan jadwal hari ini di poli ini (strict)
-     * 2. Jika kosong → ambil semua dokter yang punya jadwal di poli ini (any hari)
-     * 3. Jika masih kosong → ambil SEMUA dokter aktif (tanpa filter poli/hari)
-     *    agar form tidak pernah stuck karena data jadwal belum lengkap
+     * 1. Dokter berjadwal hari ini di poli ini
+     * 2. Dokter berjadwal di poli ini (hari apapun)
+     * 3. Semua dokter aktif (last resort)
      */
     public static function getDokterByPoli(int $poliId): array
     {
-        $hari = self::hariIniIndonesia();
+        $hari = self::hariIniIndonesia();   // FIX: method ini sekarang ada
 
         try {
             $pdo = Database::getInstance()->getConnection();
 
-            // ── Level 1: Jadwal hari ini di poli ini ──────────────
+            // Level 1: Jadwal hari ini di poli ini
             $result = self::queryDokterJadwal($pdo, $poliId, $hari);
-
             if (!empty($result)) {
                 return $result;
             }
 
-            // ── Level 2: Jadwal di poli ini (hari apapun) ─────────
-            // Berguna jika jadwal belum dikonfigurasi untuk hari ini
+            // Level 2: Jadwal di poli ini (hari apapun)
             $stmt = $pdo->prepare("
-            SELECT DISTINCT
-                d.id, d.nama, d.spesialis,
-                jd.jam_mulai, jd.jam_selesai, jd.kuota,
-                0 AS terpakai,
-                'Jadwal tersedia (hari lain)' AS keterangan
-            FROM jadwal_dokter jd
-            JOIN dokter d ON jd.dokter_id = d.id
-            WHERE jd.poli_id = :poli_id
-            ORDER BY d.nama ASC
-        ");
+                SELECT DISTINCT
+                    d.id, d.nama, d.spesialis,
+                    jd.jam_mulai, jd.jam_selesai, jd.kuota,
+                    0 AS terpakai,
+                    'Jadwal tersedia (hari lain)' AS keterangan
+                FROM jadwal_dokter jd
+                JOIN dokter d ON jd.dokter_id = d.id
+                WHERE jd.poli_id = :poli_id
+                ORDER BY d.nama ASC
+            ");
             $stmt->execute([':poli_id' => $poliId]);
             $result = $stmt->fetchAll();
-
             if (!empty($result)) {
                 return $result;
             }
 
-            // ── Level 3: Semua dokter aktif (tanpa filter jadwal) ──
-            // Last resort — pastikan form selalu bisa disubmit
+            // Level 3: Semua dokter aktif (tanpa filter jadwal)
             $stmt = $pdo->query("
-            SELECT
-                d.id, d.nama, d.spesialis,
-                '08:00'::TEXT AS jam_mulai,
-                '16:00'::TEXT AS jam_selesai,
-                999           AS kuota,
-                0             AS terpakai,
-                'Dokter umum' AS keterangan
-            FROM dokter d
-            ORDER BY d.nama ASC
-        ");
+                SELECT
+                    d.id, d.nama, d.spesialis,
+                    '08:00'::TEXT AS jam_mulai,
+                    '16:00'::TEXT AS jam_selesai,
+                    999           AS kuota,
+                    0             AS terpakai,
+                    'Dokter umum' AS keterangan
+                FROM dokter d
+                ORDER BY d.nama ASC
+            ");
             return $stmt->fetchAll();
         } catch (\PDOException $e) {
             throw new \RuntimeException('Gagal mengambil data dokter: ' . $e->getMessage());
         }
     }
 
-    /**
-     * Query dokter dengan jadwal spesifik hari ini + info kuota terpakai.
-     */
+    /** Query dokter dengan jadwal spesifik hari ini + info kuota terpakai */
     private static function queryDokterJadwal(\PDO $pdo, int $poliId, string $hari): array
     {
         $stmt = $pdo->prepare("
-        SELECT
-            d.id, d.nama, d.spesialis,
-            jd.jam_mulai, jd.jam_selesai, jd.kuota,
-            COALESCE((
-                SELECT COUNT(*)
-                FROM antrean a
-                JOIN pendaftaran p ON a.pendaftaran_id = p.id
-                WHERE p.dokter_id = d.id
-                  AND a.poli_id   = :poli_id2
-                  AND a.tanggal   = CURRENT_DATE
-                  AND a.status   != 'tidak_hadir'
-            ), 0) AS terpakai
-        FROM jadwal_dokter jd
-        JOIN dokter d ON jd.dokter_id = d.id
-        WHERE jd.poli_id = :poli_id
-          AND jd.hari    = :hari
-        ORDER BY jd.jam_mulai ASC
-    ");
+            SELECT
+                d.id, d.nama, d.spesialis,
+                jd.jam_mulai, jd.jam_selesai, jd.kuota,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM antrean a
+                    JOIN pendaftaran p ON a.pendaftaran_id = p.id
+                    WHERE p.dokter_id = d.id
+                      AND a.poli_id   = :poli_id2
+                      AND a.tanggal   = CURRENT_DATE
+                      AND a.status   != 'tidak_hadir'
+                ), 0) AS terpakai,
+                'Jadwal hari ini' AS keterangan
+            FROM jadwal_dokter jd
+            JOIN dokter d ON jd.dokter_id = d.id
+            WHERE jd.poli_id = :poli_id
+              AND jd.hari    = :hari
+            ORDER BY jd.jam_mulai ASC
+        ");
         $stmt->execute([
             ':poli_id'  => $poliId,
             ':poli_id2' => $poliId,
@@ -303,12 +310,19 @@ class Pendaftaran implements Printable
     }
 
     /**
-     * Update status pendaftaran.
+     * Nama hari dalam Bahasa Indonesia sesuai hari ini.
      *
-     * @param int    $id
-     * @param string $status
-     * @param string|null $catatan
-     * @return bool
+     * PERBAIKAN: method ini sebelumnya tidak ada di class Pendaftaran
+     * sehingga self::hariIniIndonesia() menyebabkan fatal error.
+     */
+    public static function hariIniIndonesia(): string
+    {
+        $days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+        return $days[(int) date('w')];
+    }
+
+    /**
+     * Update status pendaftaran.
      */
     public static function updateStatus(int $id, string $status, ?string $catatan = null): bool
     {
@@ -318,16 +332,13 @@ class Pendaftaran implements Printable
         }
 
         try {
-            $pdo  = Database::getInstance()->getConnection();
+            $pdo = Database::getInstance()->getConnection();
 
-            // Jika batal/selesai, bebaskan kamar
             if (in_array($status, ['selesai', 'batal'])) {
                 $pdo->beginTransaction();
-
                 $stmtGet = $pdo->prepare("SELECT kamar_id FROM pendaftaran WHERE id = :id");
                 $stmtGet->execute([':id' => $id]);
                 $row = $stmtGet->fetch();
-
                 if ($row) {
                     $pdo->prepare("UPDATE kamar SET is_tersedia = true WHERE id = :id")
                         ->execute([':id' => $row['kamar_id']]);
@@ -335,9 +346,7 @@ class Pendaftaran implements Printable
             }
 
             $stmt = $pdo->prepare(
-                "UPDATE pendaftaran
-                 SET status = :status, catatan = :catatan
-                 WHERE id = :id"
+                "UPDATE pendaftaran SET status = :status, catatan = :catatan WHERE id = :id"
             );
             $result = $stmt->execute([
                 ':id'      => $id,
@@ -345,7 +354,7 @@ class Pendaftaran implements Printable
                 ':catatan' => $catatan,
             ]);
 
-            if (isset($pdo) && $pdo->inTransaction()) {
+            if ($pdo->inTransaction()) {
                 $pdo->commit();
             }
 
@@ -360,9 +369,6 @@ class Pendaftaran implements Printable
 
     /**
      * Hapus pendaftaran + bebaskan kamar.
-     *
-     * @param int $id
-     * @return bool
      */
     public static function hapus(int $id): bool
     {
@@ -370,7 +376,6 @@ class Pendaftaran implements Printable
         try {
             $pdo->beginTransaction();
 
-            // Ambil kamar_id dulu sebelum hapus
             $stmt = $pdo->prepare("SELECT kamar_id FROM pendaftaran WHERE id = :id");
             $stmt->execute([':id' => $id]);
             $row = $stmt->fetch();
